@@ -3,3 +3,5 @@ terraform.tfstate*
 terraform.tfvars
 !examples/**/terraform.tfvars
 *.conf
+.tags
+.DS_Store
