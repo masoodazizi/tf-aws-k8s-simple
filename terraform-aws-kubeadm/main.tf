@@ -142,7 +142,7 @@ data "aws_ami" "ubuntu" {
 }
 
 resource "aws_instance" "master" {
-  ami           = data.aws_ami.ubuntu.image_id
+  ami           = var.ami == "" ? data.aws_ami.ubuntu.image_id : var.ami
   instance_type = var.master_instance_type
   subnet_id     = var.subnet_id
   key_name      = aws_key_pair.main.key_name
@@ -152,9 +152,10 @@ resource "aws_instance" "master" {
     aws_security_group.ingress_k8s.id,
     aws_security_group.ingress_ssh.id
   ]
-  tags      = merge(local.tags, { "terraform-kubeadm:node" = "master" })
+  tags      = merge(local.tags, { "Name" = "${var.cluster_name}--master", "terraform-kubeadm:node" = "master" })
   user_data = <<-EOF
   #!/bin/bash
+  set -x
 
   # Install kubeadm and Docker
   apt-get update
@@ -163,6 +164,14 @@ resource "aws_instance" "master" {
   echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" >/etc/apt/sources.list.d/kubernetes.list
   apt-get update
   apt-get install -y docker.io kubeadm
+
+  # Fix issue with docker v20.10 and HOME env var
+  DOCKER_VER=`docker --version | awk '{print $3}' | awk -F'.' '{print $1 $2}'`
+  if [[ $${DOCKER_VER} = '2010' ]]; then
+    echo 'Docker Version 20.10'
+    echo "Fixing issue with manual definition of HOME env var"
+    export HOME=/root
+  fi
 
   # Run kubeadm
   kubeadm init \
@@ -179,6 +188,9 @@ resource "aws_instance" "master" {
   chown ubuntu:ubuntu /home/ubuntu/admin.conf
   kubectl --kubeconfig /home/ubuntu/admin.conf config set-cluster kubernetes --server https://${aws_eip.master.public_ip}:6443
 
+  # Update the node hostname
+  hostnamectl set-hostname k8s-master-node
+
   # Indicate completion of bootstrapping on this node
   touch /home/ubuntu/done
   EOF
@@ -186,7 +198,7 @@ resource "aws_instance" "master" {
 
 resource "aws_instance" "workers" {
   count                       = var.num_workers
-  ami                         = data.aws_ami.ubuntu.image_id
+  ami                         = var.ami == "" ? data.aws_ami.ubuntu.image_id : var.ami
   instance_type               = var.worker_instance_type
   subnet_id                   = var.subnet_id
   associate_public_ip_address = true
@@ -196,9 +208,10 @@ resource "aws_instance" "workers" {
     aws_security_group.ingress_internal.id,
     aws_security_group.ingress_ssh.id
   ]
-  tags      = merge(local.tags, { "terraform-kubeadm:node" = "worker-${count.index}" })
+  tags      = merge(local.tags, { "Name" = "${var.cluster_name}--worker", "terraform-kubeadm:node" = "worker-${count.index}" })
   user_data = <<-EOF
   #!/bin/bash
+  set -x
 
   # Install kubeadm and Docker
   apt-get update
@@ -208,11 +221,22 @@ resource "aws_instance" "workers" {
   apt-get update
   apt-get install -y docker.io kubeadm
 
+  # Fix issue with docker v20.10 and HOME env var
+  DOCKER_VER=`docker --version | awk '{print $3}' | awk -F'.' '{print $1 $2}'`
+  if [[ $${DOCKER_VER} = '2010' ]]; then
+    echo 'Docker Version 20.10'
+    echo "Fixing issue with manual definition of HOME env var"
+    export HOME=/root
+  fi
+
   # Run kubeadm
   kubeadm join ${aws_instance.master.private_ip}:6443 \
     --token ${local.token} \
     --discovery-token-unsafe-skip-ca-verification \
     --node-name worker-${count.index}
+
+  # Update the node hostname
+  hostnamectl set-hostname k8s-worker-node-${count.index}
 
   # Indicate completion of bootstrapping on this node
   touch /home/ubuntu/done
